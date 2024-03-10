@@ -12,7 +12,7 @@ ARCH=${ARCH:-riscv}
 CROSS_COMPILE=${CROSS_COMPILE:-riscv64-unknown-linux-gnu-}
 TIMESTAMP=${TIMESTAMP:-$(date +%Y%m%d-%H%M%S)}
 
-DISTRO=${DISTRO:-revyos} # revyos or debian
+DISTRO=${DISTRO:-revyos} # revyos or debian or archlinux
 CHROOT_TARGET=${CHROOT_TARGET:-target}
 ROOTFS_IMAGE_SIZE=2G
 ROOTFS_IMAGE_FILE="k230_root.ext4"
@@ -81,22 +81,61 @@ function build_rootfs() {
 
   mount ${OUTPUT_DIR}/${ROOTFS_IMAGE_FILE} ${CHROOT_TARGET}
 
-  if [[ $DISTRO == "revyos" ]]; then
-    mmdebstrap --architectures=riscv64 \
-    --include="ca-certificates locales dosfstools bash iperf3 revyos-keyring \
-        sudo bash-completion network-manager openssh-server systemd-timesyncd cloud-utils" \
-    sid "$CHROOT_TARGET" \
-    "deb https://mirror.iscas.ac.cn/revyos/revyos-addons/ revyos-addons main" \
-    "deb https://mirror.iscas.ac.cn/revyos/revyos-base/ sid main contrib non-free non-free-firmware" 
-  else
-    mmdebstrap --architectures=riscv64 \
-    --include="ca-certificates locales dosfstools bash iperf3 debian-keyring \
-        sudo bash-completion network-manager openssh-server systemd-timesyncd cloud-utils" \
-    sid "$CHROOT_TARGET" \
-    "deb https://deb.debian.org/debian/ sid main contrib non-free non-free-firmware"
-  fi
+  if [[ $DISTRO == "archlinux" ]]; then
+    # Building rootfs
+    pacstrap \
+      -C ./extra-riscv64.conf \
+      -M \
+      $CHROOT_TARGET \
+      base
 
-  chroot $CHROOT_TARGET /bin/bash <<EOF
+    # Set default mirror to https://mirror.iscas.ac.cn/archriscv/repo/
+    sed -E -i 's|#(Server = https://mirror\.iscas\.ac\.cn/archriscv/repo/\$repo)|\1|' $CHROOT_TARGET/etc/pacman.d/mirrorlist
+
+    # Clean up pacman package cache...
+    yes y | pacman \
+    --sysroot $CHROOT_TARGET \
+    --sync --clean --clean
+
+    # Set root password (Default: archriscv)
+    usermod --root $(realpath $CHROOT_TARGET) --password $(openssl passwd -6 archriscv) root
+
+    chroot $CHROOT_TARGET /bin/bash <<EOF
+# pacman source update
+pacman -Syy
+
+# Change hostname
+echo ${DISTRO}-${BOARD} > /etc/hostname
+echo 127.0.1.1 ${DISTRO}-${BOARD} >> /etc/hosts
+
+# Set default timezone to Asia/Shanghai
+ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime
+echo "Asia/Shanghai" > /etc/timezone
+
+# Network related
+echo -e "[Match]\nName=en*\n\n[Network]\nDHCP=yes" > /etc/systemd/network/default.network
+systemctl enable systemd-networkd.service
+systemctl enable systemd-resolved.service
+
+exit
+EOF
+  else
+    if [[ $DISTRO == "revyos" ]]; then
+      mmdebstrap --architectures=riscv64 \
+        --include="ca-certificates locales dosfstools bash iperf3 revyos-keyring \
+        sudo bash-completion network-manager openssh-server systemd-timesyncd cloud-utils" \
+        sid "$CHROOT_TARGET" \
+        "deb https://mirror.iscas.ac.cn/revyos/revyos-addons/ revyos-addons main" \
+        "deb https://mirror.iscas.ac.cn/revyos/revyos-base/ sid main contrib non-free non-free-firmware"
+    else
+      mmdebstrap --architectures=riscv64 \
+        --include="ca-certificates locales dosfstools bash iperf3 debian-keyring \
+        sudo bash-completion network-manager openssh-server systemd-timesyncd cloud-utils" \
+        sid "$CHROOT_TARGET" \
+        "deb https://deb.debian.org/debian/ sid main contrib non-free non-free-firmware"
+    fi
+
+    chroot $CHROOT_TARGET /bin/bash <<EOF
 # apt update
 sed -i 's#deb [trusted=yes] http#deb http#g' /etc/apt/sources.list
 apt update
@@ -119,14 +158,15 @@ echo "Asia/Shanghai" > /etc/timezone
 exit
 EOF
 
-  if [ ! -f revyos-release ]; then
-    echo "$TIMESTAMP" > $CHROOT_TARGET/etc/revyos-release
-  else
-    cp -v revyos-release $CHROOT_TARGET/etc/revyos-release
-  fi
+    if [ ! -f revyos-release ]; then
+      echo "$TIMESTAMP" >$CHROOT_TARGET/etc/revyos-release
+    else
+      cp -v revyos-release $CHROOT_TARGET/etc/revyos-release
+    fi
 
-  # clean source
-  rm -vrf $CHROOT_TARGET/var/lib/apt/lists/*
+    # clean source
+    rm -vrf $CHROOT_TARGET/var/lib/apt/lists/*
+  fi
 
   umount ${CHROOT_TARGET}
 }
